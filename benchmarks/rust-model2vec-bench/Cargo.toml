@@ -1,0 +1,11 @@
+[package]
+name = "rust-model2vec-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+model2vec-rs = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1

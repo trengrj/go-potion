@@ -6,7 +6,7 @@
 
 Static embeddings are lightweight, extremely fast, and require no GPU resources. They are ideal for high-throughput semantic search, classification, and retrieval where transformer-quality embeddings aren't required.
 
-`go-potion` is a library for fast static text embedding inference in Go, supporting the [potion](https://huggingface.co/collections/minishlab/potion) model family. `go-potion` ports the original [model2vec](https://github.com/MinishLab/model2vec) library producing identical vectors, but encodes them an order of magnitude faster - mainly due to its native tokenizer library and use of simd. For single-threaded non-batch encoding it is over 8x faster than the original python and [rust](https://github.com/MinishLab/model2vec-rs) implementations.
+`go-potion` is a library for fast static text embedding inference in Go, supporting the [potion](https://huggingface.co/collections/minishlab/potion) model family. `go-potion` ports the original [model2vec](https://github.com/MinishLab/model2vec) library producing identical vectors, but encodes them an order of magnitude faster - mainly due to its native tokenizer library and use of simd. For single-threaded non-batch encoding it is 8-15x faster than the original python and [rust](https://github.com/MinishLab/model2vec-rs) implementations.
 
 ## Usage
 
@@ -57,7 +57,7 @@ Go tests compare tokenization and embeddings against reference output from the P
 go test ./...
 ```
 
-To regenerate new reference embeddings — after adding a model or bumping the model2vec version — run the following:
+To regenerate new reference embeddings, after adding a model or bumping the model2vec version, run the following:
 
 ```bash
 uv run validation/generate_tests.py  # regenerate validation/samples/*.json from model2vec
@@ -68,7 +68,7 @@ uv run validation/generate_tests.py  # regenerate validation/samples/*.json from
 The `benchmarks/` folder holds the Python and Rust comparison benchmarks. All benchmarks process Peter Norvig's [big.txt](https://norvig.com/big.txt) (~6.2 MB of English text) in 256-word chunks, single-threaded:
 
 ```bash
-go test -run '^$' -bench . -benchtime 5x                                        # Go: full encode + tokenize-only
+go test -run '^$' -bench . -benchtime 3x                                        # Go: full encode + tokenize-only
 uv run benchmarks/benchmark_encode_big_text.py 3                                # Python: model2vec full encode
 cargo run --release --manifest-path benchmarks/rust-model2vec-bench/Cargo.toml  # Rust: model2vec-rs full encode
 ```
@@ -76,7 +76,7 @@ cargo run --release --manifest-path benchmarks/rust-model2vec-bench/Cargo.toml  
 Each benchmark defaults to potion-base-2M and can run any other potion model — set `GO_POTION_BENCH_MODEL` for Go, or pass the HuggingFace model id to Python/Rust:
 
 ```bash
-GO_POTION_BENCH_MODEL=RETRIEVAL32M go test -run '^$' -bench . -benchtime 5x
+GO_POTION_BENCH_MODEL=RETRIEVAL32M go test -run '^$' -bench . -benchtime 3x
 uv run benchmarks/benchmark_encode_big_text.py 3 minishlab/potion-retrieval-32M
 cargo run --release --manifest-path benchmarks/rust-model2vec-bench/Cargo.toml -- 3 minishlab/potion-retrieval-32M
 ```
@@ -87,21 +87,21 @@ Results on an Apple M1 Max (model2vec 0.8.2, model2vec-rs 0.2.1), with potion-ba
 
 | Implementation | Work | Throughput |
 |---|---|---|
-| go-potion `Tokenize` | tokenize only | 62.6 MB/s (14.8M tokens/s) |
-| go-potion `Encode` | tokenize + embed | 50.5 MB/s (35k vectors/s) |
+| go-potion `Tokenize` | tokenize only | 78.4 MB/s (18.5M tokens/s) |
+| go-potion `Encode` | tokenize + embed | 60.5 MB/s (42.3k vectors/s) |
 | Rust [model2vec-rs](https://github.com/MinishLab/model2vec-rs) | tokenize + embed | 5.2 MB/s (3.7k vectors/s) |
-| Python [model2vec](https://github.com/MinishLab/model2vec) | tokenize + embed | 3.9 MB/s (2.7k vectors/s) |
+| Python [model2vec](https://github.com/MinishLab/model2vec) | tokenize + embed | 4.0 MB/s (2.8k vectors/s) |
 
 and with potion-retrieval-32M (512 dimensions):
 
 | Implementation | Work | Throughput |
 |---|---|---|
-| go-potion `Tokenize` | tokenize only | 65.3 MB/s (14.8M tokens/s) |
-| go-potion `Encode` | tokenize + embed | 29.1 MB/s (20.3k vectors/s) |
+| go-potion `Tokenize` | tokenize only | 82.7 MB/s (18.8M tokens/s) |
+| go-potion `Encode` | tokenize + embed | 32.4 MB/s (22.6k vectors/s) |
 | Rust [model2vec-rs](https://github.com/MinishLab/model2vec-rs) | tokenize + embed | 3.7 MB/s (2.6k vectors/s) |
-| Python [model2vec](https://github.com/MinishLab/model2vec) | tokenize + embed | 3.4 MB/s (2.4k vectors/s) |
+| Python [model2vec](https://github.com/MinishLab/model2vec) | tokenize + embed | 3.5 MB/s (2.4k vectors/s) |
 
-go-potion and model2vec-rs do identical work — load the same `tokenizer.json`, emit essentially identical token IDs (~1.45M per pass over big.txt), filter `[UNK]`, mean-pool and L2-normalize — yet go-potion is ~10x faster on potion-base-2M. One main cause is model2vec-rs delegates tokenization to HuggingFace's [tokenizers](https://github.com/huggingface/tokenizers) crate (`encode_batch_fast`), and this library does alignment tracking which is not needed by static embeddings.
+go-potion and model2vec-rs do identical work — load the same `tokenizer.json`, emit essentially identical token IDs (~1.45M per pass over big.txt), filter `[UNK]`, mean-pool and L2-normalize — yet go-potion is ~12x faster on potion-base-2M. One main cause is model2vec-rs delegates tokenization to HuggingFace's [tokenizers](https://github.com/huggingface/tokenizers) crate (`encode_batch_fast`), and this library does alignment tracking which is not needed by static embeddings.
 
 The static embedding of a sentence is just the l2-normalized mean of per-token vectors: token IDs go into a table lookup and are immediately reduced away. Offsets are never consulted, and there is no attention mask or padding because there is no sequence dimension, special tokens are not used (model2vec even filters `[UNK]` out), and token *order* does not affect the result. So `go-potion` implements only the forward text-to-IDs mapping as one-way passes: a fused single-pass normalizer with an ASCII fast path, zero-copy pre-tokenization into substrings, and allocation-free WordPiece lookups.
 

@@ -51,14 +51,17 @@ Each model trades off between speed, memory usage, and embedding quality. All mo
 
 ## Development
 
-Go tests compare tokenization and embeddings against reference output from the Python [model2vec](https://github.com/MinishLab/model2vec) library. The reference embeddings are not committed — generate them first with [uv](https://docs.astral.sh/uv/), then run the tests:
+Go tests compare tokenization and embeddings against reference output from the Python [model2vec](https://github.com/MinishLab/model2vec) library. The first run will download every supported model into the cache (~1.1 GB), so it takes a few minutes but subsequent runs are fast:
 
 ```bash
-uv run validation/generate_tests.py  # generate validation/samples/*.json from model2vec
 go test ./...
 ```
 
-`generate_tests.py` encodes reference embeddings from a set of English and non-English sentences (German, French, Turkish, Russian, Japanese, Korean, Arabic, Thai, emoji, code, ...) with each supported model for comparison.
+To regenerate new reference embeddings — after adding a model or bumping the model2vec version — run the following:
+
+```bash
+uv run validation/generate_tests.py  # regenerate validation/samples/*.json from model2vec
+```
 
 ### Benchmarks
 

@@ -1,4 +1,3 @@
 benchmarks/rust-model2vec-bench/target/
 *.test
 __pycache__
-validation/samples/

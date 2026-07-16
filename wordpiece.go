@@ -177,7 +177,9 @@ func preTokenize(sentence string) []string {
 func (t *wordPieceTokenizer) word2tok(dst []int, word string) ([]int, error) {
 	mark := len(dst)
 
-	if utf8.RuneCountInString(word) > t.maxInputCharsPerWord {
+	// Rune count never exceeds byte length, so words short enough in bytes
+	// skip the counting scan entirely
+	if len(word) > t.maxInputCharsPerWord && utf8.RuneCountInString(word) > t.maxInputCharsPerWord {
 		return t.dropUnknown(dst, mark, word)
 	}
 

@@ -130,6 +130,17 @@ func TestWordPieceMaxInputChars(t *testing.T) {
 	if want := []int{1, 2, 3}; !reflect.DeepEqual(got, want) {
 		t.Errorf("tokenize = %v, want %v", got, want)
 	}
+
+	// The limit counts runes, not bytes: "ααααα" is 10 bytes but 5 runes,
+	// so it must survive a limit of 5
+	tok = newTestWordPiece(map[string]int{"[UNK]": 0, "αα": 1, "##ααα": 2}, 0, 5)
+	got, err = tok.tokenize("ααααα")
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	if want := []int{1, 2}; !reflect.DeepEqual(got, want) {
+		t.Errorf("tokenize = %v, want %v", got, want)
+	}
 }
 
 func TestWordPieceNoUnknownToken(t *testing.T) {

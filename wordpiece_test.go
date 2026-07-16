@@ -39,6 +39,16 @@ func TestPreTokenize(t *testing.T) {
 		// Non-punctuation symbols stay attached
 		{"a€b", []string{"a€b"}},
 		{"...", []string{".", ".", "."}},
+		// Non-ASCII whitespace splits words like ASCII space does
+		{"a b", []string{"a", "b"}},
+		{"a b", []string{"a", "b"}},
+		{"tab\tsep", []string{"tab", "sep"}},
+		// Multibyte runes inside and at the edges of words
+		{"café tea", []string{"café", "tea"}},
+		{"—start", []string{"—", "start"}},
+		{"end—", []string{"end", "—"}},
+		{"日本語", []string{"日本語"}},
+		{"mixé!", []string{"mixé", "!"}},
 	}
 
 	for _, tc := range testCases {

@@ -94,31 +94,72 @@ func isBertPunctuation(r rune) bool {
 	return unicode.IsPunct(r)
 }
 
+// ASCII byte classes for preTokenize's fast path.
+const (
+	asciiWord byte = iota
+	asciiSpace
+	asciiPunct
+)
+
+// asciiClass classifies each ASCII byte the way the rune-level predicates
+// below classify it: unicode.IsSpace and isBertPunctuation agree with this
+// table on every value under 0x80.
+var asciiClass = func() (t [128]byte) {
+	for b := range t {
+		switch {
+		case isASCIISpace(byte(b)):
+			t[b] = asciiSpace
+		case (b >= '!' && b <= '/') || (b >= ':' && b <= '@') || (b >= '[' && b <= '`') || (b >= '{' && b <= '~'):
+			t[b] = asciiPunct
+		}
+	}
+	return t
+}()
+
 // preTokenize splits normalized text like HuggingFace's BertPreTokenizer:
 // split on whitespace (removed), then isolate each punctuation character as
 // its own word. The returned words are zero-copy substrings of sentence.
+// ASCII bytes — the entire input for most POTION models, whose normalizer
+// lowercases to ASCII-heavy text — classify through a table without rune
+// decoding; only bytes >= 0x80 take the Unicode path.
 func preTokenize(sentence string) []string {
 	words := make([]string, 0, len(sentence)/4)
 	start := -1
 
-	for i, r := range sentence {
-		switch {
-		case unicode.IsSpace(r):
+	for i := 0; i < len(sentence); {
+		var class byte
+		size := 1
+		if b := sentence[i]; b < utf8.RuneSelf {
+			class = asciiClass[b]
+		} else {
+			var r rune
+			r, size = utf8.DecodeRuneInString(sentence[i:])
+			switch {
+			case unicode.IsSpace(r):
+				class = asciiSpace
+			case isBertPunctuation(r):
+				class = asciiPunct
+			}
+		}
+
+		switch class {
+		case asciiSpace:
 			if start >= 0 {
 				words = append(words, sentence[start:i])
 				start = -1
 			}
-		case isBertPunctuation(r):
+		case asciiPunct:
 			if start >= 0 {
 				words = append(words, sentence[start:i])
 				start = -1
 			}
-			words = append(words, sentence[i:i+utf8.RuneLen(r)])
+			words = append(words, sentence[i:i+size])
 		default:
 			if start < 0 {
 				start = i
 			}
 		}
+		i += size
 	}
 	if start >= 0 {
 		words = append(words, sentence[start:])

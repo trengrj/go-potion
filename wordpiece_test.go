@@ -11,6 +11,7 @@ import (
 func newTestWordPiece(vocab map[string]int, unkID, maxChars int) *wordPieceTokenizer {
 	return &wordPieceTokenizer{
 		vocab:                vocab,
+		singleByte:           singleByteIDs(vocab),
 		unkID:                unkID,
 		maxInputCharsPerWord: maxChars,
 		normalizer:           *defaultBertNormalizer(),
@@ -39,6 +40,16 @@ func TestPreTokenize(t *testing.T) {
 		// Non-punctuation symbols stay attached
 		{"a€b", []string{"a€b"}},
 		{"...", []string{".", ".", "."}},
+		// Non-ASCII whitespace splits words like ASCII space does
+		{"a b", []string{"a", "b"}},
+		{"a b", []string{"a", "b"}},
+		{"tab\tsep", []string{"tab", "sep"}},
+		// Multibyte runes inside and at the edges of words
+		{"café tea", []string{"café", "tea"}},
+		{"—start", []string{"—", "start"}},
+		{"end—", []string{"end", "—"}},
+		{"日本語", []string{"日本語"}},
+		{"mixé!", []string{"mixé", "!"}},
 	}
 
 	for _, tc := range testCases {
@@ -79,6 +90,8 @@ func TestWordPieceTokenize(t *testing.T) {
 		// A word with no full tokenization maps to [UNK], which is
 		// dropped like model2vec does
 		{"unknown word dropped", "hello xyzzy world", []int{1, 2}},
+		{"unknown single char dropped", "hello & world", []int{1, 2}},
+		{"unknown single letter dropped", "hello z world", []int{1, 2}},
 		// Partial subword matches must not leak when the tail fails
 		{"partial match dropped whole", "hello unaffordable world", []int{1, 2}},
 		{"only unknown", "xyzzy", []int{}},
@@ -118,6 +131,17 @@ func TestWordPieceMaxInputChars(t *testing.T) {
 		t.Fatalf("tokenize: %v", err)
 	}
 	if want := []int{1, 2, 3}; !reflect.DeepEqual(got, want) {
+		t.Errorf("tokenize = %v, want %v", got, want)
+	}
+
+	// The limit counts runes, not bytes: "ααααα" is 10 bytes but 5 runes,
+	// so it must survive a limit of 5
+	tok = newTestWordPiece(map[string]int{"[UNK]": 0, "αα": 1, "##ααα": 2}, 0, 5)
+	got, err = tok.tokenize("ααααα")
+	if err != nil {
+		t.Fatalf("tokenize: %v", err)
+	}
+	if want := []int{1, 2}; !reflect.DeepEqual(got, want) {
 		t.Errorf("tokenize = %v, want %v", got, want)
 	}
 }

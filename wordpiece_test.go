@@ -11,6 +11,7 @@ import (
 func newTestWordPiece(vocab map[string]int, unkID, maxChars int) *wordPieceTokenizer {
 	return &wordPieceTokenizer{
 		vocab:                vocab,
+		singleByte:           singleByteIDs(vocab),
 		unkID:                unkID,
 		maxInputCharsPerWord: maxChars,
 		normalizer:           *defaultBertNormalizer(),
@@ -89,6 +90,8 @@ func TestWordPieceTokenize(t *testing.T) {
 		// A word with no full tokenization maps to [UNK], which is
 		// dropped like model2vec does
 		{"unknown word dropped", "hello xyzzy world", []int{1, 2}},
+		{"unknown single char dropped", "hello & world", []int{1, 2}},
+		{"unknown single letter dropped", "hello z world", []int{1, 2}},
 		// Partial subword matches must not leak when the tail fails
 		{"partial match dropped whole", "hello unaffordable world", []int{1, 2}},
 		{"only unknown", "xyzzy", []int{}},

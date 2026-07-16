@@ -31,10 +31,25 @@ type wordPieceConfig struct {
 // token are dropped, matching model2vec, which filters unknown tokens out
 // before averaging embeddings.
 type wordPieceTokenizer struct {
-	vocab                map[string]int
+	vocab map[string]int
+	// singleByte caches the vocab IDs of single-ASCII-byte tokens (-1 when
+	// absent), so the isolated punctuation words the pre-tokenizer produces
+	// skip the map lookup.
+	singleByte           [128]int32
 	unkID                int // -1 if the vocabulary has no unknown token
 	maxInputCharsPerWord int
 	normalizer           bertNormalizer
+}
+
+// singleByteIDs builds the singleByte cache from a vocabulary.
+func singleByteIDs(vocab map[string]int) (t [128]int32) {
+	for b := range t {
+		t[b] = -1
+		if id, ok := vocab[string(rune(b))]; ok {
+			t[b] = int32(id)
+		}
+	}
+	return t
 }
 
 // newWordPieceTokenizer builds a wordPieceTokenizer from a parsed
@@ -64,6 +79,7 @@ func newWordPieceTokenizer(file tokenizerFile) (*wordPieceTokenizer, error) {
 
 	return &wordPieceTokenizer{
 		vocab:                cfg.Model.Vocab,
+		singleByte:           singleByteIDs(cfg.Model.Vocab),
 		unkID:                unkID,
 		maxInputCharsPerWord: maxInputCharsPerWord,
 		normalizer:           *bertNormalizerFromConfig(cfg),
@@ -180,6 +196,13 @@ func (t *wordPieceTokenizer) word2tok(dst []int, word string) ([]int, error) {
 	// Rune count never exceeds byte length, so words short enough in bytes
 	// skip the counting scan entirely
 	if len(word) > t.maxInputCharsPerWord && utf8.RuneCountInString(word) > t.maxInputCharsPerWord {
+		return t.dropUnknown(dst, mark, word)
+	}
+
+	if len(word) == 1 && word[0] < utf8.RuneSelf {
+		if id := t.singleByte[word[0]]; id >= 0 {
+			return append(dst, int(id)), nil
+		}
 		return t.dropUnknown(dst, mark, word)
 	}
 

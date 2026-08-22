@@ -99,6 +99,32 @@ func TestLoadAndEncode(t *testing.T) {
 	}
 }
 
+func TestMmapAndClose(t *testing.T) {
+	if _, _, err := mmapFile(os.Args[0]); err != nil {
+		t.Skip("mmap not supported on this platform")
+	}
+
+	encoder, err := New(t.Context(), BASE2M)
+	if err != nil {
+		t.Fatalf("Failed to create encoder: %v", err)
+	}
+
+	if encoder.unmap == nil {
+		t.Fatal("embeddings were copied to the heap instead of aliasing the mmapped file")
+	}
+
+	if _, err := encoder.Encode("hello world"); err != nil {
+		t.Fatalf("Failed to encode: %v", err)
+	}
+
+	if err := encoder.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatalf("Second Close failed: %v", err)
+	}
+}
+
 func TestZeroed(t *testing.T) {
 	encoder, err := New(t.Context(), BASE2M)
 	if err != nil {

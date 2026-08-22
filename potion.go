@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/nlpodyssey/safetensors"
 	"github.com/tphakala/simd/f32"
@@ -86,6 +87,10 @@ type Potion struct {
 	weights []float64
 	mapping []int64
 	tok     tokenizer
+	// unmap releases the read-only file mapping that embeddings aliases.
+	// Nil when the weights live on the Go heap instead (non-unix platforms,
+	// F16 models, or misaligned/big-endian fallbacks).
+	unmap func() error
 }
 
 // l2 calculates the L2 norm of a vector
@@ -173,56 +178,87 @@ func float16ToFloat32(h uint16) float32 {
 	}
 }
 
+// hostLittleEndian reports whether this machine's byte order matches the
+// little-endian layout safetensors files are stored in.
+var hostLittleEndian = binary.NativeEndian.Uint16([]byte{0x01, 0x02}) == binary.LittleEndian.Uint16([]byte{0x01, 0x02})
+
 // tensorFloat32 decodes a tensor into float32 values, converting from the
 // dtype the model was published with. POTION models store embeddings as F32
-// except potion-code-16M-v2, which uses F16.
-func tensorFloat32(t safetensors.TensorView) ([]float32, error) {
+// except potion-code-16M-v2, which uses F16. When the F32 bytes can be used
+// in place (little-endian host, 4-byte-aligned data), the returned slice
+// aliases the tensor's backing buffer instead of copying it and aliased is
+// true — with an mmapped file this is what lets concurrent processes share
+// one physical copy of the weights.
+func tensorFloat32(t safetensors.TensorView) (out []float32, aliased bool, err error) {
 	data := t.Data()
 	switch t.DType() {
 	case safetensors.F32:
-		out := make([]float32, len(data)/4)
+		if len(data) >= 4 && hostLittleEndian && uintptr(unsafe.Pointer(&data[0]))%4 == 0 {
+			return unsafe.Slice((*float32)(unsafe.Pointer(&data[0])), len(data)/4), true, nil
+		}
+		out = make([]float32, len(data)/4)
 		for i := range out {
 			out[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[i*4:]))
 		}
-		return out, nil
+		return out, false, nil
 	case safetensors.F16:
-		out := make([]float32, len(data)/2)
+		out = make([]float32, len(data)/2)
 		for i := range out {
 			out[i] = float16ToFloat32(binary.LittleEndian.Uint16(data[i*2:]))
 		}
-		return out, nil
+		return out, false, nil
 	default:
-		return nil, fmt.Errorf("unsupported tensor dtype: %s", t.DType())
+		return nil, false, fmt.Errorf("unsupported tensor dtype: %s", t.DType())
 	}
 }
 
 // loadEmbeddings loads the model weights from a safetensors file. Alongside
 // the embedding matrix it returns the optional per-token weights (F64) and
 // token-to-row mapping (I64) tensors used by vocabulary-quantized models.
-func loadEmbeddings(safetensorsPath string) (embeddings []float32, dimensions int, weights []float64, mapping []int64, err error) {
-	data, err := os.ReadFile(safetensorsPath)
-	if err != nil {
-		return nil, 0, nil, nil, err
+//
+// The file is memory-mapped rather than read into the heap, and on the
+// common path (F32 weights, little-endian host) the returned embeddings
+// slice aliases the mapping directly, so concurrent processes loading the
+// same model share one physical copy of the weights through the OS page
+// cache. The returned unmap function releases the mapping; it is non-nil
+// exactly when embeddings aliases mapped memory, and must not be called
+// while embeddings is still in use. Where mapping is unavailable or the
+// bytes need conversion, the weights live on the Go heap and unmap is nil.
+func loadEmbeddings(safetensorsPath string) (embeddings []float32, dimensions int, weights []float64, mapping []int64, unmap func() error, err error) {
+	data, unmapData, mmapErr := mmapFile(safetensorsPath)
+	if mmapErr != nil {
+		data, err = os.ReadFile(safetensorsPath)
+		if err != nil {
+			return nil, 0, nil, nil, nil, err
+		}
 	}
+	// Release the mapping unless the embeddings slice ends up aliasing it
+	aliased := false
+	defer func() {
+		if unmapData != nil && !aliased {
+			unmapData()
+		}
+	}()
 
 	st, err := safetensors.Deserialize(data)
 	if err != nil {
-		return nil, 0, nil, nil, err
+		return nil, 0, nil, nil, nil, err
 	}
 
 	tensor, ok := st.Tensor("embeddings")
 	if !ok {
-		return nil, 0, nil, nil, fmt.Errorf("embeddings tensor not found")
+		return nil, 0, nil, nil, nil, fmt.Errorf("embeddings tensor not found")
 	}
-	embeddings, err = tensorFloat32(tensor)
+	embeddings, aliased, err = tensorFloat32(tensor)
 	if err != nil {
-		return nil, 0, nil, nil, fmt.Errorf("embeddings: %w", err)
+		return nil, 0, nil, nil, nil, fmt.Errorf("embeddings: %w", err)
 	}
 	dimensions = int(tensor.Shape()[1])
 
 	if t, ok := st.Tensor("weights"); ok {
 		if t.DType() != safetensors.F64 {
-			return nil, 0, nil, nil, fmt.Errorf("weights: unsupported tensor dtype: %s", t.DType())
+			aliased = false
+			return nil, 0, nil, nil, nil, fmt.Errorf("weights: unsupported tensor dtype: %s", t.DType())
 		}
 		raw := t.Data()
 		weights = make([]float64, len(raw)/8)
@@ -233,7 +269,8 @@ func loadEmbeddings(safetensorsPath string) (embeddings []float32, dimensions in
 
 	if t, ok := st.Tensor("mapping"); ok {
 		if t.DType() != safetensors.I64 {
-			return nil, 0, nil, nil, fmt.Errorf("mapping: unsupported tensor dtype: %s", t.DType())
+			aliased = false
+			return nil, 0, nil, nil, nil, fmt.Errorf("mapping: unsupported tensor dtype: %s", t.DType())
 		}
 		raw := t.Data()
 		mapping = make([]int64, len(raw)/8)
@@ -242,7 +279,10 @@ func loadEmbeddings(safetensorsPath string) (embeddings []float32, dimensions in
 		}
 	}
 
-	return embeddings, dimensions, weights, mapping, nil
+	if aliased {
+		unmap = unmapData
+	}
+	return embeddings, dimensions, weights, mapping, unmap, nil
 }
 
 // loadTokenizer parses tokenizer.json and constructs the tokenizer
@@ -298,6 +338,11 @@ func resolveCacheDir() (string, error) {
 // variable to cache them elsewhere. The context bounds the downloads —
 // cancelling it aborts an in-flight transfer without leaving a partial file
 // in the cache. Once the model is cached, New performs no network I/O.
+//
+// Where the platform allows it, the model weights are memory-mapped
+// read-only rather than copied onto the Go heap, so loading is near-instant
+// and concurrent processes using the same model share one physical copy of
+// the weights through the OS page cache. See Close.
 func New(ctx context.Context, modelKind Model) (*Potion, error) {
 	repo, ok := modelRepos[modelKind]
 	if !ok {
@@ -332,13 +377,16 @@ func New(ctx context.Context, modelKind Model) (*Potion, error) {
 		return nil, err
 	}
 
-	embeddings, dimensions, weights, mapping, err := loadEmbeddings(safetensorsPath)
+	embeddings, dimensions, weights, mapping, unmap, err := loadEmbeddings(safetensorsPath)
 	if err != nil {
 		return nil, err
 	}
 
 	tok, err := loadTokenizer(tokenizerPath)
 	if err != nil {
+		if unmap != nil {
+			unmap()
+		}
 		return nil, err
 	}
 
@@ -348,7 +396,24 @@ func New(ctx context.Context, modelKind Model) (*Potion, error) {
 		weights:    weights,
 		mapping:    mapping,
 		tok:        tok,
+		unmap:      unmap,
 	}, nil
+}
+
+// Close releases the memory-mapped model weights. The Potion must not be
+// used after Close. Calling it is optional — a model that lives for the
+// life of the process can skip it, since the OS reclaims the mapping at
+// exit — but programs that load and discard many models should Close them,
+// because mapped weights are invisible to the Go garbage collector. Close
+// is a no-op when the weights live on the Go heap.
+func (p *Potion) Close() error {
+	if p.unmap == nil {
+		return nil
+	}
+	unmap := p.unmap
+	p.unmap = nil
+	p.embeddings = nil
+	return unmap()
 }
 
 // Dimensions returns the width of the embeddings this model produces, e.g.

@@ -1,9 +1,12 @@
 package potion
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -99,6 +102,105 @@ func TestLoadAndEncode(t *testing.T) {
 	}
 }
 
+// embeddingsFileOffset returns the file offset at which the embeddings
+// tensor's data starts
+func embeddingsFileOffset(tb testing.TB, path string) uint64 {
+	tb.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		tb.Fatalf("Failed to read %s: %v", path, err)
+	}
+	headerLen := binary.LittleEndian.Uint64(raw[:8])
+	var tensors map[string]struct {
+		DataOffsets []uint64 `json:"data_offsets"`
+	}
+	if err := json.Unmarshal(raw[8:8+headerLen], &tensors); err != nil {
+		tb.Fatalf("Failed to parse header of %s: %v", path, err)
+	}
+	return 8 + headerLen + tensors["embeddings"].DataOffsets[0]
+}
+
+func TestAlignSafetensors(t *testing.T) {
+	values := []float32{1, 2, 3, 4, 5, 6}
+	cases := []struct {
+		name   string
+		header string
+		// data preceding the embeddings tensor in the data section, as in
+		// quantized models where weights/mapping come first
+		prefix []byte
+	}{
+		{
+			name:   "embeddings only",
+			header: `{"embeddings":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}`,
+		},
+		{
+			name:   "preceding tensor",
+			header: `{"weights":{"dtype":"F64","shape":[1],"data_offsets":[0,8]},"embeddings":{"dtype":"F32","shape":[2,3],"data_offsets":[8,32]}}`,
+			prefix: make([]byte, 8),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Build a valid file whose embeddings tensor is deliberately
+			// misaligned, like the 8-byte-padded headers HuggingFace serves
+			file := binary.LittleEndian.AppendUint64(nil, uint64(len(tc.header)))
+			file = append(file, tc.header...)
+			file = append(file, tc.prefix...)
+			for _, v := range values {
+				file = binary.LittleEndian.AppendUint32(file, math.Float32bits(v))
+			}
+
+			path := filepath.Join(t.TempDir(), "model.safetensors")
+			if err := os.WriteFile(path, file, 0644); err != nil {
+				t.Fatalf("Failed to write test file: %v", err)
+			}
+			if off := embeddingsFileOffset(t, path); off%tensorAlignment == 0 {
+				t.Fatalf("Test file embeddings offset %d is already aligned; the test needs a misaligned one", off)
+			}
+
+			if err := alignSafetensors(path); err != nil {
+				t.Fatalf("alignSafetensors failed: %v", err)
+			}
+			if off := embeddingsFileOffset(t, path); off%tensorAlignment != 0 {
+				t.Errorf("Embeddings offset %d not aligned to %d after alignSafetensors", off, tensorAlignment)
+			}
+
+			embeddings, dimensions, _, _, unmap, err := loadEmbeddings(path)
+			if err != nil {
+				t.Fatalf("Failed to load realigned file: %v", err)
+			}
+			if unmap != nil {
+				defer unmap()
+			}
+			if dimensions != 3 {
+				t.Errorf("Expected 3 dimensions, got %d", dimensions)
+			}
+			for i, v := range values {
+				if embeddings[i] != v {
+					t.Errorf("Embedding %d: expected %f, got %f", i, v, embeddings[i])
+				}
+			}
+
+			// A second call must leave the aligned file untouched
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("Failed to read aligned file: %v", err)
+			}
+			if err := alignSafetensors(path); err != nil {
+				t.Fatalf("alignSafetensors on aligned file failed: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("Failed to re-read aligned file: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Error("alignSafetensors modified an already-aligned file")
+			}
+		})
+	}
+}
+
 func TestMmapAndClose(t *testing.T) {
 	if _, _, err := mmapFile(os.Args[0]); err != nil {
 		t.Skip("mmap not supported on this platform")
@@ -111,6 +213,13 @@ func TestMmapAndClose(t *testing.T) {
 
 	if encoder.unmap == nil {
 		t.Fatal("embeddings were copied to the heap instead of aliasing the mmapped file")
+	}
+
+	// New must have realigned the cached file so mmapped rows sit on
+	// cache-line boundaries
+	cached := filepath.Join(testCacheDir(t), string(BASE2M), "model.safetensors")
+	if off := embeddingsFileOffset(t, cached); off%tensorAlignment != 0 {
+		t.Errorf("Cached model embeddings offset %d not aligned to %d", off, tensorAlignment)
 	}
 
 	if _, err := encoder.Encode("hello world"); err != nil {

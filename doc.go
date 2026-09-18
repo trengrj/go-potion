@@ -19,4 +19,7 @@
 // A Potion is immutable after New and safe for concurrent use; Encode may
 // be called from any number of goroutines. Embeddings are L2-normalized, so
 // the dot product of two embeddings is their cosine similarity.
+//
+// Tokenizers can be used on their own through NewTokenizer, which takes any
+// HuggingFace repository with a supported tokenizer.json.
 package potion

@@ -49,6 +49,11 @@ var modelRepos = map[Model]string{
 	MULTILINGUAL128M: "minishlab/potion-multilingual-128M",
 }
 
+// Repo returns the model's HuggingFace repository, or "" if unknown.
+func (m Model) Repo() string {
+	return modelRepos[m]
+}
+
 // Models returns all supported models in a stable order.
 func Models() []Model {
 	return []Model{
@@ -59,10 +64,10 @@ func Models() []Model {
 	}
 }
 
-// tokenizer converts raw text into the token IDs model2vec would produce for
-// the same model. The two implementations mirror the two tokenizer families
-// used by POTION models: WordPiece (all base/retrieval/science/code models)
-// and SentencePiece Unigram (potion-multilingual-128M).
+// tokenizer converts raw text into token IDs. The implementations mirror
+// the tokenizer families of the supported models: WordPiece (all POTION
+// base/retrieval/science/code models), SentencePiece Unigram
+// (potion-multilingual-128M) and Gemma-style BPE (mLateOn).
 type tokenizer interface {
 	tokenize(sentence string) ([]int, error)
 }
@@ -71,9 +76,11 @@ type tokenizer interface {
 // and model sections differ per tokenizer family, so they are kept raw and
 // interpreted by the family-specific constructors.
 type tokenizerFile struct {
-	Normalizer   json.RawMessage `json:"normalizer"`
-	PreTokenizer json.RawMessage `json:"pre_tokenizer"`
-	Model        json.RawMessage `json:"model"`
+	Normalizer    json.RawMessage `json:"normalizer"`
+	PreTokenizer  json.RawMessage `json:"pre_tokenizer"`
+	Model         json.RawMessage `json:"model"`
+	AddedTokens   json.RawMessage `json:"added_tokens"`
+	PostProcessor json.RawMessage `json:"post_processor"`
 }
 
 // Potion is the main struct for loading and using the model
@@ -387,34 +394,41 @@ func loadEmbeddings(safetensorsPath string) (embeddings []float32, dimensions in
 
 // loadTokenizer parses tokenizer.json and constructs the tokenizer
 // implementation matching the file's model type.
-func loadTokenizer(tokenizerPath string) (tokenizer, error) {
+func loadTokenizer(tokenizerPath string) (*Tokenizer, error) {
 	data, err := os.ReadFile(tokenizerPath)
 	if err != nil {
 		return nil, err
 	}
 
-	var file tokenizerFile
-	if err := json.Unmarshal(data, &file); err != nil {
+	file, err := splitTokenizerFile(data)
+	if err != nil {
 		return nil, err
 	}
 
-	var probe struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(file.Model, &probe); err != nil {
+	modelType, err := modelSectionType(file.Model)
+	if err != nil {
 		return nil, fmt.Errorf("tokenizer model section: %w", err)
 	}
 
-	switch probe.Type {
+	var tok tokenizer
+	switch modelType {
 	case "Unigram":
-		return newUnigramTokenizer(file)
+		tok, err = newUnigramTokenizer(file)
+	case "BPE":
+		tok, err = newBPETokenizer(file)
 	case "WordPiece", "":
 		// Older tokenizer.json files omit the model type; WordPiece is
 		// the historical default for POTION models
-		return newWordPieceTokenizer(file)
+		tok, err = newWordPieceTokenizer(file)
 	default:
-		return nil, fmt.Errorf("unsupported tokenizer model type: %s", probe.Type)
+		return nil, fmt.Errorf("unsupported tokenizer model type: %s", modelType)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	template, templateErr := parsePostProcessor(file.PostProcessor)
+	return &Tokenizer{tok: tok, template: template, templateErr: templateErr}, nil
 }
 
 // resolveCacheDir returns the directory model files are cached in: the
@@ -500,7 +514,7 @@ func New(ctx context.Context, modelKind Model) (*Potion, error) {
 		dimensions: dimensions,
 		weights:    weights,
 		mapping:    mapping,
-		tok:        tok,
+		tok:        tok.tok,
 		unmap:      unmap,
 	}, nil
 }

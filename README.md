@@ -49,6 +49,15 @@ The library supports these models in Minish Lab's [potion collection](https://hu
 
 Each model trades off between speed, memory usage, and embedding quality. All models share the WordPiece/BERT tokenization pipeline except `MULTILINGUAL128M`, which uses a SentencePiece Unigram pipeline (Precompiled charsmap normalization, Metaspace pre-tokenization, and Viterbi decoding). go-potion implements both and picks the right one from the model's `tokenizer.json`.
 
+## Tokenizers
+
+Tokenizers can be used without loading embeddings, for any HuggingFace repository with a supported `tokenizer.json` (BERT WordPiece, Unigram or BPE with Metaspace). Output matches HuggingFace's [tokenizers](https://github.com/huggingface/tokenizers) token for token; this is tested for all POTION models and [lightonai/mLateOn](https://huggingface.co/lightonai/mLateOn), which runs at about 20x the single-threaded throughput.
+
+```go
+tokenizer, err := potion.NewTokenizer(ctx, "lightonai/mLateOn")
+ids, err := tokenizer.Tokenize("late interaction retrieval") // Encode adds special tokens
+```
+
 For a good overview on static embeddings, including retrieval quality to performance ratio, please refer to [this article](https://huggingface.co/blog/Pringled/model2vec).
 
 ## Development
@@ -73,6 +82,7 @@ The `benchmarks/` folder holds the Python and Rust comparison benchmarks. All be
 go test -run '^$' -bench . -benchtime 3x                                        # Go: full encode + tokenize-only
 uv run benchmarks/benchmark_encode_big_text.py 3                                # Python: model2vec full encode
 cargo run --release --manifest-path benchmarks/rust-model2vec-bench/Cargo.toml  # Rust: model2vec-rs full encode
+uv run benchmarks/benchmark_tokenize_big_text.py 3                              # Python: HuggingFace tokenizers, tokenize-only
 ```
 
 Each benchmark defaults to potion-base-2M and can run any other potion model by setting `GO_POTION_BENCH_MODEL` for Go, or passing the HuggingFace model id to Python/Rust:

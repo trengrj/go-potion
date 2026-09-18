@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -442,9 +443,14 @@ func BenchmarkEncodeBigText(b *testing.B) {
 func BenchmarkTokenizeBigText(b *testing.B) {
 	cacheDir := testCacheDir(b)
 
-	encoder, err := New(b.Context(), benchModel(b))
+	// GO_POTION_BENCH_MODEL may also be a HuggingFace repository here
+	repo := os.Getenv("GO_POTION_BENCH_MODEL")
+	if !strings.Contains(repo, "/") {
+		repo = benchModel(b).Repo()
+	}
+	encoder, err := NewTokenizer(b.Context(), repo)
 	if err != nil {
-		b.Fatalf("Failed to create encoder: %v", err)
+		b.Fatalf("Failed to create tokenizer: %v", err)
 	}
 
 	chunks := bigTextChunks(b, cacheDir)
@@ -468,6 +474,76 @@ func BenchmarkTokenizeBigText(b *testing.B) {
 
 	b.ReportMetric(float64(totalBytes)/elapsed.Seconds()/1024/1024, "MB/s")
 	b.ReportMetric(float64(totalTokens)/elapsed.Seconds()/1e6, "Mtokens/s")
+}
+
+type TokenizerTestCase struct {
+	Text     string `json:"text"`
+	Tokens   []int  `json:"tokens"`
+	InputIDs []int  `json:"input_ids"`
+}
+
+func TestTokenizerReference(t *testing.T) {
+	for _, repo := range []string{"lightonai/mLateOn"} {
+		t.Run(repo, func(t *testing.T) {
+			tok, err := NewTokenizer(t.Context(), repo)
+			if err != nil {
+				t.Fatalf("Failed to create tokenizer: %v", err)
+			}
+
+			samplesPath := filepath.Join("validation", "samples", strings.ReplaceAll(repo, "/", "--")+".json")
+			data, err := os.ReadFile(samplesPath)
+			if err != nil {
+				t.Fatalf("Failed to read %s: %v", samplesPath, err)
+			}
+			var testCases []TokenizerTestCase
+			if err := json.Unmarshal(data, &testCases); err != nil {
+				t.Fatalf("Failed to parse %s: %v", samplesPath, err)
+			}
+
+			for _, tc := range testCases {
+				t.Run(tc.Text, func(t *testing.T) {
+					tokens, err := tok.Tokenize(tc.Text)
+					if err != nil {
+						t.Fatalf("Failed to tokenize: %v", err)
+					}
+					if !reflect.DeepEqual(tokens, tc.Tokens) {
+						t.Errorf("Tokenize mismatch:\n got %v\nwant %v", tokens, tc.Tokens)
+					}
+					inputIDs, err := tok.Encode(tc.Text)
+					if err != nil {
+						t.Fatalf("Failed to encode: %v", err)
+					}
+					if !reflect.DeepEqual(inputIDs, tc.InputIDs) {
+						t.Errorf("Encode mismatch:\n got %v\nwant %v", inputIDs, tc.InputIDs)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNewTokenizer(t *testing.T) {
+	for _, repo := range []string{"", "BASE2M", "a/b/c", "../x", "a/.."} {
+		if _, err := NewTokenizer(t.Context(), repo); err == nil {
+			t.Errorf("NewTokenizer(%q) succeeded, want an invalid repository error", repo)
+		}
+	}
+
+	encoder, err := New(t.Context(), BASE2M)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tok, err := NewTokenizer(t.Context(), BASE2M.Repo())
+	if err != nil {
+		t.Fatalf("NewTokenizer: %v", err)
+	}
+	for _, text := range []string{"Hello world!", "It's dangerous to go alone", ""} {
+		want, _ := encoder.Tokenize(text)
+		got, err := tok.Tokenize(text)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("Tokenize(%q) = %v, %v; want %v", text, got, err, want)
+		}
+	}
 }
 
 func TestTokenization(t *testing.T) {

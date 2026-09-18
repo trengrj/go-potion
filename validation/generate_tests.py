@@ -1,19 +1,21 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["model2vec"]
+# dependencies = ["model2vec", "tokenizers"]
 # ///
-"""Generate reference tokenization and embedding samples with model2vec.
+"""Generate reference tokenization and embedding samples.
 
 Writes one samples/<MODEL>.json per model into this directory. The Go test
 suite (potion_test.go) compares its own output against these files.
 
-Run from the repository root with: uv run validation/generate_tests.py
+Run from the repository root with: uv run validation/generate_tests.py [MODEL...]
 """
 
 import json
+import sys
 from pathlib import Path
 
 from model2vec import StaticModel
+from tokenizers import Tokenizer
 
 # Every model in the POTION collection
 # (https://huggingface.co/collections/minishlab/potion)
@@ -27,6 +29,11 @@ MODELS = {
     "CODE16M": "minishlab/potion-code-16M",
     "CODE16MV2": "minishlab/potion-code-16M-v2",
     "MULTILINGUAL128M": "minishlab/potion-multilingual-128M",
+}
+
+# Tokenizer-only models, validated against HuggingFace tokenizers
+TOKENIZER_MODELS = {
+    "lightonai--mLateOn": "lightonai/mLateOn",
 }
 
 # potion-code-16M-v2 ships float16 embeddings; numpy would then average in
@@ -86,12 +93,53 @@ EXAMPLES = [
     "Mixed languages: hello, 世界, мир, and عالم together",
 ]
 
+BPE_EXAMPLES = [
+    "hello  world",
+    "  leading and trailing  ",
+    "tabs\tand\t\tnewlines\n\n\nend",
+    "a▁literal▁meta▁char and ▁▁ a run",
+    "hello <b>bold</b> <mask> and <unused5> and <bos>text<eos>",
+    "hello <mask>",
+    "[Q] what is a late interaction model?",
+    "[D] Late interaction models keep one vector per token.",
+    "x [Q]  double space",
+    "𝔘𝔫𝔦𝔠𝔬𝔡𝔢 fallback bytes",
+    "\u0000null and \ue000private use",
+    "<b></b><i> </i>",
+    "日本語のテキストは空白で区切られていないので、とても長い単一の前置トークンになります。" * 4,
+    "supercalifragilisticexpialidocious-antidisestablishmentarianism_pneumonoultramicroscopicsilicovolcanoconiosis",
+    "x" + "\n" * 40 + "y" + "\t" * 35 + "z" + " " * 40 + "w",
+]
+
 
 def main() -> None:
     out_dir = Path(__file__).parent / "samples"
     out_dir.mkdir(exist_ok=True)
+    selected = set(sys.argv[1:])
+
+    for name, repo in TOKENIZER_MODELS.items():
+        if selected and name not in selected:
+            continue
+        print(f"Generating tokenizer samples for {name} ({repo})...")
+        tokenizer = Tokenizer.from_pretrained(repo)
+        tokenizer.no_truncation()
+        output = []
+        for example in EXAMPLES + BPE_EXAMPLES:
+            output.append(
+                {
+                    "text": example,
+                    "tokens": tokenizer.encode(example, add_special_tokens=False).ids,
+                    "input_ids": tokenizer.encode(example).ids,
+                }
+            )
+        out_path = out_dir / f"{name}.json"
+        with open(out_path, "w") as f:
+            json.dump(output, f, indent=2, ensure_ascii=False)
+        print(f"Wrote {out_path}")
 
     for name, repo in MODELS.items():
+        if selected and name not in selected:
+            continue
         print(f"Generating samples for {name} ({repo})...")
         model = StaticModel.from_pretrained(repo, quantize_to=QUANTIZE_TO.get(name))
 

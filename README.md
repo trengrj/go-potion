@@ -33,7 +33,7 @@ Model files are downloaded on first use and cached in the platform-native per-us
 
 ## Model Variants
 
-The library supports these models in Minish Lab's [potion collection](https://huggingface.co/collections/minishlab/potion):
+The library supports the models in Minish Lab's [potion collection](https://huggingface.co/collections/minishlab/potion), plus [blink-8M](https://huggingface.co/minishlab/blink-8M):
 
 | Constant | HuggingFace model | Dimensions | Size on disk | Notes |
 |---|---|---|---|---|
@@ -46,6 +46,7 @@ The library supports these models in Minish Lab's [potion collection](https://hu
 | `CODE16M` | [potion-code-16M](https://huggingface.co/minishlab/potion-code-16M) | 256 | 65 MB | Tuned for code; vocabulary-quantized (per-token weights + embedding row mapping) |
 | `CODE16MV2` | [potion-code-16M-v2](https://huggingface.co/minishlab/potion-code-16M-v2) | 256 | 34 MB | Tuned for code; float16 embeddings (converted to float32 on load) |
 | `MULTILINGUAL128M` | [potion-multilingual-128M](https://huggingface.co/minishlab/potion-multilingual-128M) | 256 | 531 MB | 101 languages; SentencePiece Unigram tokenizer instead of WordPiece |
+| `BLINK8M` | [blink-8M](https://huggingface.co/minishlab/blink-8M) | 256 | 31 MB | Contrastively trained successor to potion-base-8M; same size, stronger retrieval |
 
 Each model trades off between speed, memory usage, and embedding quality. All models share the WordPiece/BERT tokenization pipeline except `MULTILINGUAL128M`, which uses a SentencePiece Unigram pipeline (Precompiled charsmap normalization, Metaspace pre-tokenization, and Viterbi decoding). go-potion implements both and picks the right one from the model's `tokenizer.json`.
 

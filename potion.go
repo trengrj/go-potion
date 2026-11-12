@@ -31,11 +31,13 @@ const (
 	CODE16M          Model = "CODE16M"
 	CODE16MV2        Model = "CODE16MV2"
 	MULTILINGUAL128M Model = "MULTILINGUAL128M"
+	BLINK8M          Model = "BLINK8M"
 )
 
 // modelRepos maps each supported model to its HuggingFace repository. This
 // covers every model in the POTION collection
-// (https://huggingface.co/collections/minishlab/potion).
+// (https://huggingface.co/collections/minishlab/potion), plus blink-8M, the
+// contrastively trained successor to potion-base-8M.
 var modelRepos = map[Model]string{
 	BASE2M:           "minishlab/potion-base-2M",
 	BASE4M:           "minishlab/potion-base-4M",
@@ -46,6 +48,7 @@ var modelRepos = map[Model]string{
 	CODE16M:          "minishlab/potion-code-16M",
 	CODE16MV2:        "minishlab/potion-code-16M-v2",
 	MULTILINGUAL128M: "minishlab/potion-multilingual-128M",
+	BLINK8M:          "minishlab/blink-8M",
 }
 
 // Models returns all supported models in a stable order.
@@ -55,6 +58,7 @@ func Models() []Model {
 		RETRIEVAL32M, SCIENCE32M,
 		CODE16M, CODE16MV2,
 		MULTILINGUAL128M,
+		BLINK8M,
 	}
 }
 

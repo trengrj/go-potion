@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["model2vec", "requests"]
+# dependencies = ["model2vec>=0.10.0", "requests"]
 # ///
 """
 Benchmark script to test encoding big text using the Potion model.

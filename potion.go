@@ -16,7 +16,6 @@ import (
 	"unsafe"
 
 	"github.com/nlpodyssey/safetensors"
-	"github.com/tphakala/simd/f32"
 )
 
 // Model identifies one of the POTION models the package can load
@@ -562,37 +561,28 @@ func (p *Potion) Encode(sentence string) ([]float32, error) {
 // poolMean averages the embedding rows of tokens and L2-normalizes the
 // result. Accumulation runs in float32, matching what model2vec (numpy) and
 // model2vec-rs do for non-quantized models, directly into the output buffer
-// so Encode allocates nothing beyond its result. Each row is sliced to
-// len(out) before the inner loop so the compiler can prove the indexing in
-// bounds and drop the per-element checks — this loop dominates Encode's
-// runtime.
+// so Encode allocates nothing beyond its result. Summing the rows dominates
+// Encode's runtime for the wider models and is done by sumRows, a SIMD
+// kernel where the platform has one.
 func (p *Potion) poolMean(tokens []int) []float32 {
 	out := make([]float32, p.dimensions)
-	if p.dimensions >= simdMinDims {
-		for _, token := range tokens {
-			f32.AccumulateAdd(out, p.rowOf(token), 0)
+	if p.mapping != nil {
+		rows := make([]int, len(tokens))
+		for i, token := range tokens {
+			rows[i] = int(p.mapping[token])
 		}
-	} else {
-		// Short rows don't amortize the SIMD call overhead; sum four
-		// token rows per pass instead to cut the load/store traffic on
-		// out, which bounds this loop.
-		k := 0
-		for ; k+3 < len(tokens); k += 4 {
-			a := p.rowOf(tokens[k])[:len(out)]
-			b := p.rowOf(tokens[k+1])[:len(out)]
-			c := p.rowOf(tokens[k+2])[:len(out)]
-			d := p.rowOf(tokens[k+3])[:len(out)]
-			for i := range out {
-				out[i] += (a[i] + b[i]) + (c[i] + d[i])
-			}
-		}
-		for ; k < len(tokens); k++ {
-			a := p.rowOf(tokens[k])[:len(out)]
-			for i := range out {
-				out[i] += a[i]
-			}
+		tokens = rows
+	}
+	// sumRows does not bounds-check, so reject row indexes the embedding
+	// matrix doesn't have (a tokenizer.json that doesn't belong to the
+	// weights) here, the way indexing the slice would
+	rows := len(p.embeddings) / p.dimensions
+	for _, token := range tokens {
+		if uint(token) >= uint(rows) {
+			panic(fmt.Sprintf("potion: token %d out of range for %d embedding rows", token, rows))
 		}
 	}
+	sumRows(out, p.embeddings, tokens)
 
 	// Average the embeddings
 	n := float32(len(tokens))
@@ -611,13 +601,6 @@ func (p *Potion) poolMean(tokens []int) []float32 {
 	}
 	return out
 }
-
-// simdMinDims is the embedding width from which poolMean accumulates rows
-// with SIMD (github.com/tphakala/simd, NEON/AVX with a pure-Go fallback).
-// Below it, per-row call overhead outweighs the vectorization win and a
-// scalar four-rows-per-pass loop is faster; measured crossover on an Apple
-// M1 Max sits between potion-base-2M (64 dims) and potion-base-4M (128).
-const simdMinDims = 128
 
 // rowOf returns the embedding row for a token, applying the row mapping of
 // vocabulary-quantized models when present.

@@ -2,20 +2,17 @@ package potion
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"reflect"
+	"strings"
 	"testing"
 )
 
 // newTestWordPiece builds a WordPiece tokenizer over a small synthetic
 // vocabulary, bypassing tokenizer.json parsing.
 func newTestWordPiece(vocab map[string]int, unkID, maxChars int) *wordPieceTokenizer {
-	return &wordPieceTokenizer{
-		vocab:                vocab,
-		singleByte:           singleByteIDs(vocab),
-		unkID:                unkID,
-		maxInputCharsPerWord: maxChars,
-		normalizer:           *defaultBertNormalizer(),
-	}
+	return newWordPiece(vocab, unkID, maxChars, *defaultBertNormalizer())
 }
 
 func TestPreTokenize(t *testing.T) {
@@ -201,5 +198,182 @@ func TestNewWordPieceTokenizer(t *testing.T) {
 	}
 	if tok.maxInputCharsPerWord != 100 {
 		t.Errorf("maxInputCharsPerWord = %d, want default 100", tok.maxInputCharsPerWord)
+	}
+}
+
+// TestTokenizeASCIIMatchesGeneral checks that the fused ASCII fast path
+// yields exactly the tokens of the general normalize / pre-tokenize /
+// WordPiece pipeline, over random ASCII text and every normalizer setting
+// the fast path looks at.
+func TestTokenizeASCIIMatchesGeneral(t *testing.T) {
+	// Pieces around the pieceKeyBytes boundary, with continuation pieces,
+	// upper-case entries (reachable only without lowercasing) and
+	// punctuation both in and out of the vocabulary
+	pieces := []string{
+		"[UNK]", "a", "b", "c", "x", "0", "1", "ab", "abc", "the", "hello", "world",
+		"abcdefg", "abcdefgh", "abcdefghi", "abcdefghijklmnop", "bcdefgha",
+		"abcdefghabcdefgh", "abcdefghabcdefgha", "abcdefghabcdefghab",
+		"##a", "##b", "##c", "##s", "##ab", "##ing", "##abcdef", "##abcdefgh", "##abcdefghi",
+		"##abcdefghabcdefgh", "##abcdefghabcdefgha",
+		"A", "AB", "Hello", "##S", "ABCDEFGHI",
+		".", ",", "!", "'", "#", "[", "]", "-",
+	}
+	vocab := make(map[string]int, len(pieces))
+	for i, piece := range pieces {
+		vocab[piece] = i
+	}
+
+	// Mostly letters that form vocabulary words, plus every kind of byte
+	// the fast path classifies: whitespace, punctuation, control
+	// characters, DEL and NUL
+	alphabet := []string{
+		"a", "b", "c", "s", "x", "A", "B", "S", "0", "1", "ab", "abc", "the", "hello", "Hello",
+		"abcdefgh", "abcdefghi", "ABCDEFGHI", "ing", "world",
+		" ", " ", " ", "\t", "\n", "\r", "\v", "\f", ".", ",", "!", "'", "#", "?", "-",
+		"\x00", "\x01", "\x1f", "\x7f",
+	}
+
+	rng := rand.New(rand.NewSource(1))
+	for _, cleanText := range []bool{true, false} {
+		for _, lowercase := range []bool{true, false} {
+			for _, unkID := range []int{0, -1} {
+				name := fmt.Sprintf("clean=%v/lower=%v/unk=%d", cleanText, lowercase, unkID)
+				t.Run(name, func(t *testing.T) {
+					normalizer := *newBertNormalizer(cleanText, true, lowercase, lowercase)
+					tok := newWordPiece(vocab, unkID, 20, normalizer)
+					fastHits := 0
+					for i := 0; i < 20000; i++ {
+						var sb strings.Builder
+						for n := rng.Intn(12); n > 0; n-- {
+							sb.WriteString(alphabet[rng.Intn(len(alphabet))])
+						}
+						input := sb.String()
+
+						want, wantErr := tok.tokenizeGeneral(nil, input)
+						got, ok, gotErr := tok.tokenizeASCII(nil, input)
+						if !ok && gotErr == nil {
+							continue // handed to the general pipeline
+						}
+						fastHits++
+						if (gotErr != nil) != (wantErr != nil) {
+							t.Fatalf("%q: fast path error %v, general error %v", input, gotErr, wantErr)
+						}
+						if gotErr != nil {
+							if gotErr.Error() != wantErr.Error() {
+								t.Fatalf("%q: fast path error %q, general error %q", input, gotErr, wantErr)
+							}
+							continue
+						}
+						if len(got) != len(want) || (len(got) > 0 && !reflect.DeepEqual(got, want)) {
+							t.Fatalf("%q: fast path %v, general %v", input, got, want)
+						}
+					}
+					if fastHits < 1000 {
+						t.Fatalf("fast path handled only %d inputs", fastHits)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestTokenizeASCIIFallsBack checks the inputs the fast path must hand to
+// the general pipeline, and that the result is right end to end.
+func TestTokenizeASCIIFallsBack(t *testing.T) {
+	vocab := map[string]int{"[UNK]": 0, "ab": 1, "abcd": 2, "cd": 3, "caf": 4, "##e": 5, "cafe": 6}
+	tok := newTestWordPiece(vocab, 0, 100)
+
+	for _, tc := range []struct {
+		input    string
+		expected []int
+	}{
+		// A deleted control character joins its neighbours into one word
+		{"ab\x01cd", []int{2}},
+		{"ab cd\x00", []int{1, 3}},
+		// Non-ASCII text needs accent stripping
+		{"ab café", []int{1, 6}},
+	} {
+		if _, ok, _ := tok.tokenizeASCII(nil, tc.input); ok {
+			t.Errorf("%q: fast path should have fallen back", tc.input)
+		}
+		got, err := tok.tokenize(tc.input)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.input, err)
+		}
+		if !reflect.DeepEqual(got, tc.expected) {
+			t.Errorf("%q: got %v, want %v", tc.input, got, tc.expected)
+		}
+	}
+}
+
+func TestPieceTable(t *testing.T) {
+	// Lengths either side of the two key halves, keys that differ only
+	// in trailing NUL bytes, and enough entries to force probe chains
+	pieces := map[string]int{
+		"a": 1, "a\x00": 2, "a\x00\x00": 3, "abcdefg": 4, "abcdefgh": 5, "abcdefgh\x00": 6,
+		"abcdefghi": 7, "abcdefghijklmno": 8, "abcdefghijklmnop": 9, "héllo": 10,
+	}
+	for i := 0; i < 5000; i++ {
+		pieces[fmt.Sprintf("w%d", i)] = 100 + i
+	}
+	table := newPieceTable(pieces)
+	if len(table.tags) < 4*len(pieces) || len(table.tags) != len(table.entries) {
+		t.Fatalf("table has %d tags and %d entries for %d pieces", len(table.tags), len(table.entries), len(pieces))
+	}
+
+	lookup := func(piece string) int {
+		lo, hi := pieceKey(loadKey(piece, 0), loadKey(piece, 8), len(piece))
+		return table.lookup(lo, hi, len(piece))
+	}
+	for piece, id := range pieces {
+		if got := lookup(piece); got != id {
+			t.Errorf("lookup(%q) = %d, want %d", piece, got, id)
+		}
+	}
+	for _, absent := range []string{"b", "a\x00\x00\x00", "abcdefgi", "abcdefghijklmn", "abcdefghijklmnoq", "w5000", "W1"} {
+		if got := lookup(absent); got != -1 {
+			t.Errorf("lookup(%q) = %d, want -1", absent, got)
+		}
+	}
+}
+
+func TestScanWord(t *testing.T) {
+	isAlnum := func(b byte) bool {
+		return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+	}
+	// Every byte value in every position, between neighbours that would
+	// expose a carry between bytes
+	for _, fill := range []byte{'a', 'Z', '0', '9', 'm'} {
+		for b := 0; b < 0x100; b++ {
+			for pos := 0; pos < 8; pos++ {
+				var x uint64
+				for k := 0; k < 8; k++ {
+					c := fill
+					if k == pos {
+						c = byte(b)
+					}
+					x |= uint64(c) << (8 * k)
+				}
+				n, lowered := scanWord(x)
+
+				wantN := 8
+				if !isAlnum(byte(b)) {
+					wantN = pos
+				}
+				if n != wantN {
+					t.Fatalf("byte %#x at %d in %q fill: n = %d, want %d", b, pos, fill, n, wantN)
+				}
+				for k := 0; k < 8; k++ {
+					c := byte(x >> (8 * k))
+					want := c
+					if c >= 'A' && c <= 'Z' {
+						want += 'a' - 'A'
+					}
+					if got := byte(lowered >> (8 * k)); got != want {
+						t.Fatalf("byte %#x at %d in %q fill: lowered[%d] = %#x, want %#x", b, pos, fill, k, got, want)
+					}
+				}
+			}
+		}
 	}
 }

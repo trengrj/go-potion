@@ -6,7 +6,7 @@
 
 Static embeddings are lightweight, extremely fast, and require no GPU resources. They are ideal for high-throughput semantic search, classification, and retrieval where transformer-quality embeddings aren't required.
 
-`go-potion` is a library for fast static text embedding inference in pure Go (no cgo), supporting Minish Lab's [potion](https://huggingface.co/collections/minishlab/potion) model family. `go-potion` ports the original [model2vec](https://github.com/MinishLab/model2vec) library producing identical vectors, but encodes them an order of magnitude faster - mainly due to its native tokenizer library and use of SIMD. For single-threaded non-batch encoding it is 8-15x faster than the original Python and [Rust](https://github.com/MinishLab/model2vec-rs) implementations.
+`go-potion` is a library for fast static text embedding inference in pure Go (no cgo), supporting Minish Lab's [potion](https://huggingface.co/collections/minishlab/potion) model family. `go-potion` ports the original [model2vec](https://github.com/MinishLab/model2vec) library producing identical vectors, but encodes them much faster - mainly due to its native tokenizer and hand-written SIMD kernels. For single-threaded non-batch encoding it is 20-50x faster than the original Python implementation and about 1.5-3x faster than the [Rust](https://github.com/MinishLab/model2vec-rs) one.
 
 ## Usage
 
@@ -70,7 +70,7 @@ uv run validation/generate_tests.py  # regenerate validation/samples/*.json from
 The `benchmarks/` folder holds the Python and Rust comparison benchmarks. All benchmarks process Peter Norvig's [big.txt](https://norvig.com/big.txt) (~6.2 MB of English text) in 256-word chunks, single-threaded:
 
 ```bash
-go test -run '^$' -bench . -benchtime 3x                                        # Go: full encode + tokenize-only
+go test -run '^$' -bench . -benchtime 3x                                        # Go: full encode, tokenize-only, pool-only
 uv run benchmarks/benchmark_encode_big_text.py 3                                # Python: model2vec full encode
 cargo run --release --manifest-path benchmarks/rust-model2vec-bench/Cargo.toml  # Rust: model2vec-rs full encode
 ```
@@ -87,29 +87,35 @@ cargo run --release --manifest-path benchmarks/rust-model2vec-bench/Cargo.toml -
 
 These benchmarks compare single-threaded, non-batch encoding performance (mirroring a low-latency scenario like embedding a search query).
 
-Results on an Apple M1 Max (model2vec 0.8.2, model2vec-rs 0.2.1), with potion-base-2M (64 dimensions):
+Results on an Apple M4 (model2vec 0.10.0, model2vec-rs 0.4.0), with potion-base-2M (64 dimensions):
 
 | Implementation | Work | Throughput |
 |---|---|---|
-| go-potion `Tokenize` | tokenize only | 78.4 MB/s (18.5M tokens/s) |
-| go-potion `Encode` | tokenize + embed | 60.5 MB/s (42.3k vectors/s) |
-| Rust [model2vec-rs](https://github.com/MinishLab/model2vec-rs) | tokenize + embed | 5.2 MB/s (3.7k vectors/s) |
-| Python [model2vec](https://github.com/MinishLab/model2vec) | tokenize + embed | 4.0 MB/s (2.8k vectors/s) |
+| go-potion `Tokenize` | tokenize only | 390 MB/s (92.2M tokens/s) |
+| go-potion `Encode` | tokenize + embed | 287 MB/s (201k vectors/s) |
+| Rust [model2vec-rs](https://github.com/MinishLab/model2vec-rs) | tokenize + embed | 103 MB/s (72.1k vectors/s) |
+| Python [model2vec](https://github.com/MinishLab/model2vec) | tokenize + embed | 6.1 MB/s (4.3k vectors/s) |
 
 and with potion-retrieval-32M (512 dimensions):
 
 | Implementation | Work | Throughput |
 |---|---|---|
-| go-potion `Tokenize` | tokenize only | 82.7 MB/s (18.8M tokens/s) |
-| go-potion `Encode` | tokenize + embed | 32.4 MB/s (22.6k vectors/s) |
-| Rust [model2vec-rs](https://github.com/MinishLab/model2vec-rs) | tokenize + embed | 3.7 MB/s (2.6k vectors/s) |
-| Python [model2vec](https://github.com/MinishLab/model2vec) | tokenize + embed | 3.5 MB/s (2.4k vectors/s) |
+| go-potion `Tokenize` | tokenize only | 460 MB/s (104M tokens/s) |
+| go-potion `Encode` | tokenize + embed | 107 MB/s (74.6k vectors/s) |
+| Rust [model2vec-rs](https://github.com/MinishLab/model2vec-rs) | tokenize + embed | 61 MB/s (43.0k vectors/s) |
+| Python [model2vec](https://github.com/MinishLab/model2vec) | tokenize + embed | 5.4 MB/s (3.8k vectors/s) |
 
-go-potion and model2vec-rs both load the same `tokenizer.json`, emit identical token IDs (~1.45M each test run), filter `[UNK]`, mean-pool and l2-normalize - yet go-potion is ~12x faster on potion-base-2M. One main cause is model2vec-rs usage of HuggingFace's [tokenizers](https://github.com/huggingface/tokenizers) crate (`encode_batch_fast`), which does additional work to support various transformer models including things like alignment tracking which is not needed by static embeddings.
+All three load the same `tokenizer.json`, emit identical token IDs (~1.45M each pass over the text), filter `[UNK]`, mean-pool and l2-normalize. Python model2vec tokenizes through HuggingFace's [tokenizers](https://github.com/huggingface/tokenizers) library, which does additional work to support transformer models (alignment tracking, for one) that static embeddings don't need. model2vec-rs has had its own WordPiece tokenizer since 0.4, which made it much faster than earlier releases.
 
-A static embedding is the normalized mean of the table rows picked out by the token IDs and nothing else from the tokenizer is needed. There are no offsets, masks, padding, or special tokens (model2vec even filters `[UNK]` out), and token order doesn't matter. So `go-potion` implements only the forward text-to-IDs mapping: a fused single-pass normalizer with an ASCII fast path, zero-copy pre-tokenization into substrings, and allocation-free WordPiece lookups.
+A static embedding is the normalized mean of the table rows picked out by the token IDs and nothing else from the tokenizer is needed. There are no offsets, masks, padding, or special tokens (model2vec even filters `[UNK]` out), and token order doesn't matter. So `go-potion` implements only the forward text-to-IDs mapping, and for ASCII text does it in a single pass over the raw input with no intermediate strings:
 
-The mean-pooling loop in `go-potion` is optimized as well: it accumulates in float32 (as model2vec and model2vec-rs do for non-quantized models) directly into the output buffer, with conditional SIMD usage when the embeddings are large enough (>= 128 dimensions).
+- words are measured and lowercased eight bytes at a time with SWAR bit tricks rather than byte by byte
+- those same bytes, packed into two `uint64`s, are the word's vocabulary key, looked up in an open-addressing hash table with one-byte tags - no string hashing or comparison, and failed lookups (greedy WordPiece makes several per piece it finds) are settled from the L1-resident tags
+- words that need splitting into pieces are split with shifts and masks on that key, without leaving registers
+
+Text with non-ASCII characters takes a general path through the full normalizer (NFD, accent stripping, CJK handling).
+
+The mean-pooling loop is a hand-written assembly kernel (NEON on arm64, AVX2 on amd64, with a portable Go fallback - build with `-tags purego` to force it). It sums eight embedding rows per pass (four with AVX2) directly into the output buffer, so the accumulator is loaded and stored once per group instead of once per row. Rows are still added in token order, so every implementation produces bit-identical sums, matching the row-by-row float32 accumulation of model2vec and model2vec-rs.
 
 ## License
 

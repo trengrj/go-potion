@@ -50,3 +50,8 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      # The same tests against the portable code the assembly kernels
+      # replace
+      - name: Test (purego)
+        run: go test -tags purego ./...

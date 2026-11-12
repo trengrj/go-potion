@@ -8,15 +8,18 @@ Writes one samples/<MODEL>.json per model into this directory. The Go test
 suite (potion_test.go) compares its own output against these files.
 
 Run from the repository root with: uv run validation/generate_tests.py
+Pass model names to regenerate only those, e.g.:
+uv run validation/generate_tests.py BLINK8M
 """
 
 import json
+import sys
 from pathlib import Path
 
 from model2vec import StaticModel
 
 # Every model in the POTION collection
-# (https://huggingface.co/collections/minishlab/potion)
+# (https://huggingface.co/collections/minishlab/potion), plus blink-8M
 MODELS = {
     "BASE2M": "minishlab/potion-base-2M",
     "BASE4M": "minishlab/potion-base-4M",
@@ -27,6 +30,7 @@ MODELS = {
     "CODE16M": "minishlab/potion-code-16M",
     "CODE16MV2": "minishlab/potion-code-16M-v2",
     "MULTILINGUAL128M": "minishlab/potion-multilingual-128M",
+    "BLINK8M": "minishlab/blink-8M",
 }
 
 # potion-code-16M-v2 ships float16 embeddings; numpy would then average in
@@ -91,7 +95,9 @@ def main() -> None:
     out_dir = Path(__file__).parent / "samples"
     out_dir.mkdir(exist_ok=True)
 
-    for name, repo in MODELS.items():
+    names = sys.argv[1:] or list(MODELS)
+    for name in names:
+        repo = MODELS[name]
         print(f"Generating samples for {name} ({repo})...")
         model = StaticModel.from_pretrained(repo, quantize_to=QUANTIZE_TO.get(name))
 

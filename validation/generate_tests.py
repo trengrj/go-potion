@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["model2vec"]
+# dependencies = ["model2vec>=0.10.0"]
 # ///
 """Generate reference tokenization and embedding samples with model2vec.
 
